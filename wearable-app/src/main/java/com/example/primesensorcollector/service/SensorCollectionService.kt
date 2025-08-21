@@ -15,6 +15,8 @@ import android.hardware.SensorEventListener2
 import com.example.primesensorcollector.data.models.BiometricReading
 import com.example.primesensorcollector.data.models.InertialReading
 import com.example.primesensorcollector.data.models.Vector3D
+import com.example.primesensorcollector.data.transmission.DataTransmissionManager
+import com.example.primesensorcollector.data.transmission.WearableCommunicationClientImpl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +48,10 @@ class SensorCollectionService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private lateinit var powerManager: PowerManager
     private var wakeLock: PowerManager.WakeLock? = null
+    
+    // Data transmission
+    private lateinit var dataTransmissionManager: DataTransmissionManager
+    private lateinit var communicationClient: WearableCommunicationClientImpl
     
     // Sensors
     private var accelerometer: Sensor? = null
@@ -85,6 +91,9 @@ class SensorCollectionService : Service(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         
+        // Initialize communication and data transmission
+        initializeDataTransmission()
+        
         // Initialize sensors
         initializeSensors()
         
@@ -119,6 +128,64 @@ class SensorCollectionService : Service(), SensorEventListener {
         super.onDestroy()
         Log.d(TAG, "SensorCollectionService destroyed")
         stopCollection()
+        
+        // Clean up transmission components
+        if (::dataTransmissionManager.isInitialized) {
+            dataTransmissionManager.stop()
+        }
+        if (::communicationClient.isInitialized) {
+            communicationClient.cleanup()
+        }
+    }
+    
+    /**
+     * Initialize data transmission components
+     */
+    private fun initializeDataTransmission() {
+        // Initialize communication client
+        communicationClient = WearableCommunicationClientImpl(this)
+        
+        // Initialize data transmission manager
+        dataTransmissionManager = DataTransmissionManager(communicationClient)
+        
+        // Set up command listener for start/stop commands from smartphone
+        communicationClient.setCommandListener { command, data ->
+            handleRemoteCommand(command, data)
+        }
+        
+        serviceScope.launch {
+            // Initialize communication client
+            val success = communicationClient.initialize()
+            if (success) {
+                Log.d(TAG, "Communication client initialized successfully")
+                dataTransmissionManager.start()
+            } else {
+                Log.e(TAG, "Failed to initialize communication client")
+            }
+        }
+    }
+    
+    /**
+     * Handle remote commands from smartphone
+     */
+    private fun handleRemoteCommand(command: String, data: String?) {
+        Log.d(TAG, "Received remote command: $command")
+        
+        when (command) {
+            WearableCommunicationClientImpl.COMMAND_START_COLLECTION -> {
+                data?.let { sessionData ->
+                    val parts = sessionData.split("|")
+                    if (parts.size >= 2) {
+                        val sessionId = parts[0]
+                        val deviceId = parts[1]
+                        startCollection(sessionId, deviceId)
+                    }
+                }
+            }
+            WearableCommunicationClientImpl.COMMAND_STOP_COLLECTION -> {
+                stopCollection()
+            }
+        }
     }
     
     /**
@@ -184,6 +251,11 @@ class SensorCollectionService : Service(), SensorEventListener {
         // Register sensor listeners
         registerSensorListeners()
         
+        // Report status to smartphone
+        serviceScope.launch {
+            communicationClient.reportStatus(WearableCommunicationClientImpl.STATUS_COLLECTING)
+        }
+        
         Log.d(TAG, "Sensor collection started")
     }
     
@@ -212,6 +284,12 @@ class SensorCollectionService : Service(), SensorEventListener {
             }
         }
         wakeLock = null
+        
+        // Force transmission of any remaining buffered data
+        serviceScope.launch {
+            dataTransmissionManager.forceTransmission()
+            communicationClient.reportStatus(WearableCommunicationClientImpl.STATUS_IDLE)
+        }
         
         Log.d(TAG, "Sensor collection stopped")
     }
@@ -307,6 +385,10 @@ class SensorCollectionService : Service(), SensorEventListener {
             batteryLevel = batteryLevel
         )
         
+        // Buffer data for transmission to smartphone
+        dataTransmissionManager.bufferInertialReading(reading)
+        
+        // Also emit to local flow for any local listeners
         serviceScope.launch {
             _inertialDataFlow.emit(reading)
         }
@@ -334,6 +416,10 @@ class SensorCollectionService : Service(), SensorEventListener {
             batteryLevel = batteryLevel
         )
         
+        // Buffer data for transmission to smartphone
+        dataTransmissionManager.bufferBiometricReading(reading)
+        
+        // Also emit to local flow for any local listeners
         serviceScope.launch {
             _biometricDataFlow.emit(reading)
         }
