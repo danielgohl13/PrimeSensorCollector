@@ -49,8 +49,21 @@ class WearableCommunicationClientImpl(
             // Add message listener
             messageClient.addListener(this@WearableCommunicationClientImpl)
             
-            // Find connected nodes
-            updateConnectedNodes()
+            // Find connected nodes - let exceptions propagate during initialization
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                val firstNode = nodes.firstOrNull()
+                connectedNodeId = firstNode?.id
+                
+                if (connectedNodeId != null) {
+                    Log.d(TAG, "Connected to node: $connectedNodeId")
+                } else {
+                    Log.w(TAG, "No connected nodes found")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating connected nodes during initialization", e)
+                throw e // Re-throw during initialization
+            }
             
             Log.d(TAG, "WearableCommunicationClient initialized successfully")
             true
