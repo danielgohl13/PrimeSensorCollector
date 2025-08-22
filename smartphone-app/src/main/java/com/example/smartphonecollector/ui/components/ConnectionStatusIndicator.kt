@@ -21,7 +21,8 @@ import com.example.smartphonecollector.ui.theme.PrimeSensorCollectorTheme
 @Composable
 fun ConnectionStatusIndicator(
     connectionStatus: ConnectionStatus,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRetryClick: (() -> Unit)? = null
 ) {
     val (icon, color, text) = when (connectionStatus) {
         ConnectionStatus.CONNECTED -> Triple(
@@ -79,9 +80,19 @@ fun ConnectionStatusIndicator(
                 )
             }
             
-            // Connection strength indicator (for connected state)
-            if (connectionStatus == ConnectionStatus.CONNECTED) {
-                ConnectionStrengthIndicator()
+            // Connection strength indicator (for connected state) or retry button (for error state)
+            when (connectionStatus) {
+                ConnectionStatus.CONNECTED -> {
+                    ConnectionStrengthIndicator()
+                }
+                ConnectionStatus.ERROR -> {
+                    onRetryClick?.let { retry ->
+                        TextButton(onClick = retry) {
+                            Text("Retry")
+                        }
+                    }
+                }
+                else -> { /* No additional UI for CONNECTING or DISCONNECTED */ }
             }
         }
     }

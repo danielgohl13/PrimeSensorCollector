@@ -22,7 +22,9 @@ import kotlinx.coroutines.launch
 class WearableCommunicationService(
     private val context: Context,
     private val onInertialDataReceived: (InertialReading) -> Unit,
-    private val onBiometricDataReceived: (BiometricReading) -> Unit
+    private val onBiometricDataReceived: (BiometricReading) -> Unit,
+    private val onStartCollectionRequested: ((sessionId: String) -> Unit)? = null,
+    private val onStopCollectionRequested: (() -> Unit)? = null
 ) : MessageClient.OnMessageReceivedListener, DataClient.OnDataChangedListener {
 
     companion object {
@@ -34,6 +36,11 @@ class WearableCommunicationService(
         private const val INERTIAL_DATA_PATH = "/inertial_data"
         private const val BIOMETRIC_DATA_PATH = "/biometric_data"
         private const val STATUS_REQUEST_PATH = "/status_request"
+        
+        // Wearable-initiated message paths
+        private const val SENSOR_DATA_PATH = "/sensor_data"
+        private const val COMMAND_MESSAGE_PATH = "/commands"
+        private const val STATUS_MESSAGE_PATH = "/status"
         
         // Node capability for finding wearable devices
         private const val WEARABLE_CAPABILITY = "wearable_data_collector"
@@ -53,6 +60,9 @@ class WearableCommunicationService(
     
     // Connected nodes
     private var connectedNodes: Set<Node> = emptySet()
+    
+    // Track when data was last received to help with connection status
+    private var lastDataReceivedTime = System.currentTimeMillis()
     
     init {
         // Register listeners
@@ -121,16 +131,38 @@ class WearableCommunicationService(
             val nodes = getConnectedNodes()
             val isConnected = nodes.isNotEmpty()
             
-            _connectionStatus.value = if (isConnected) {
-                ConnectionStatus.CONNECTED
-            } else {
-                ConnectionStatus.DISCONNECTED
-            }
-            
             Log.d(TAG, "Connection status checked: $isConnected")
             isConnected
         } catch (e: Exception) {
             Log.e(TAG, "Error checking connection status", e)
+            false
+        }
+    }
+    
+    /**
+     * Force refresh connection status - useful for manual retry
+     */
+    suspend fun refreshConnectionStatus(): Boolean {
+        return try {
+            Log.d(TAG, "Manually refreshing connection status")
+            val isConnected = checkConnectionStatus()
+            val currentTime = System.currentTimeMillis()
+            val hasRecentData = (currentTime - lastDataReceivedTime) < 30000
+            
+            _connectionStatus.value = when {
+                isConnected || hasRecentData -> {
+                    Log.i(TAG, "Connection refresh successful")
+                    ConnectionStatus.CONNECTED
+                }
+                else -> {
+                    Log.w(TAG, "Connection refresh shows disconnected")
+                    ConnectionStatus.DISCONNECTED
+                }
+            }
+            
+            isConnected || hasRecentData
+        } catch (e: Exception) {
+            Log.e(TAG, "Error refreshing connection status", e)
             _connectionStatus.value = ConnectionStatus.ERROR
             false
         }
@@ -208,24 +240,34 @@ class WearableCommunicationService(
     private fun startConnectionMonitoring() {
         serviceScope.launch {
             var consecutiveFailures = 0
-            val maxConsecutiveFailures = 6 // 30 seconds of failures before error state
+            val maxConsecutiveFailures = 12 // 60 seconds of failures before error state (increased tolerance)
             
             while (true) {
                 try {
                     val wasConnected = _connectionStatus.value == ConnectionStatus.CONNECTED
                     val isConnected = checkConnectionStatus()
+                    val currentTime = System.currentTimeMillis()
                     
-                    if (isConnected) {
+                    // Check if we've received data recently (within last 30 seconds)
+                    val hasRecentData = (currentTime - this@WearableCommunicationService.lastDataReceivedTime) < 30000
+                    
+                    // Consider connection good if either capability check passes OR we're receiving data
+                    val effectivelyConnected = isConnected || hasRecentData
+                    
+                    if (effectivelyConnected) {
                         consecutiveFailures = 0
                         if (!wasConnected) {
+                            _connectionStatus.value = ConnectionStatus.CONNECTED
                             Log.i(TAG, "Connection restored to wearable device")
+                        } else if (_connectionStatus.value != ConnectionStatus.CONNECTED) {
+                            _connectionStatus.value = ConnectionStatus.CONNECTED
                         }
                     } else {
                         consecutiveFailures++
                         if (consecutiveFailures >= maxConsecutiveFailures) {
                             _connectionStatus.value = ConnectionStatus.ERROR
                             Log.e(TAG, "Connection lost for ${consecutiveFailures * 5} seconds - entering error state")
-                        } else if (wasConnected) {
+                        } else if (wasConnected || _connectionStatus.value == ConnectionStatus.CONNECTED) {
                             _connectionStatus.value = ConnectionStatus.CONNECTING
                             Log.w(TAG, "Connection lost, attempting to reconnect... (attempt $consecutiveFailures/$maxConsecutiveFailures)")
                         }
@@ -235,7 +277,9 @@ class WearableCommunicationService(
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in connection monitoring", e)
                     consecutiveFailures++
-                    _connectionStatus.value = ConnectionStatus.ERROR
+                    if (consecutiveFailures >= maxConsecutiveFailures) {
+                        _connectionStatus.value = ConnectionStatus.ERROR
+                    }
                     kotlinx.coroutines.delay(10000) // Wait longer on error
                 }
             }
@@ -254,6 +298,15 @@ class WearableCommunicationService(
             }
             BIOMETRIC_DATA_PATH -> {
                 handleBiometricData(messageEvent.data)
+            }
+            SENSOR_DATA_PATH -> {
+                handleSensorDataMessage(messageEvent.data)
+            }
+            COMMAND_MESSAGE_PATH -> {
+                handleCommandMessage(messageEvent.data)
+            }
+            STATUS_MESSAGE_PATH -> {
+                handleStatusMessage(messageEvent.data)
             }
             else -> {
                 Log.w(TAG, "Unknown message path: ${messageEvent.path}")
@@ -291,6 +344,7 @@ class WearableCommunicationService(
         try {
             val inertialReading = DataSerializer.deserializeInertialReading(data)
             Log.d(TAG, "Inertial data received: ${inertialReading.timestamp}")
+            lastDataReceivedTime = System.currentTimeMillis()
             onInertialDataReceived(inertialReading)
         } catch (e: Exception) {
             Log.e(TAG, "Error deserializing inertial data", e)
@@ -304,6 +358,7 @@ class WearableCommunicationService(
         try {
             val biometricReading = DataSerializer.deserializeBiometricReading(data)
             Log.d(TAG, "Biometric data received: ${biometricReading.timestamp}")
+            lastDataReceivedTime = System.currentTimeMillis()
             onBiometricDataReceived(biometricReading)
         } catch (e: Exception) {
             Log.e(TAG, "Error deserializing biometric data", e)
@@ -317,6 +372,7 @@ class WearableCommunicationService(
         try {
             val inertialReading = DataSerializer.deserializeInertialReadingFromDataMap(dataMap)
             Log.d(TAG, "Inertial data received via DataMap: ${inertialReading.timestamp}")
+            lastDataReceivedTime = System.currentTimeMillis()
             onInertialDataReceived(inertialReading)
         } catch (e: Exception) {
             Log.e(TAG, "Error deserializing inertial data from DataMap", e)
@@ -330,9 +386,103 @@ class WearableCommunicationService(
         try {
             val biometricReading = DataSerializer.deserializeBiometricReadingFromDataMap(dataMap)
             Log.d(TAG, "Biometric data received via DataMap: ${biometricReading.timestamp}")
+            lastDataReceivedTime = System.currentTimeMillis()
             onBiometricDataReceived(biometricReading)
         } catch (e: Exception) {
             Log.e(TAG, "Error deserializing biometric data from DataMap", e)
+        }
+    }
+
+    /**
+     * Handle sensor data messages from wearable (unified format)
+     */
+    private fun handleSensorDataMessage(data: ByteArray) {
+        try {
+            val messageData = String(data, Charsets.UTF_8)
+            val parts = messageData.split("|", limit = 2)
+            
+            if (parts.size < 2) {
+                Log.w(TAG, "Invalid sensor data message format")
+                return
+            }
+            
+            val messageType = parts[0]
+            val payload = parts[1]
+            
+            when (messageType) {
+                "inertial_data" -> {
+                    val inertialReading = DataSerializer.deserializeInertialReading(payload.toByteArray())
+                    Log.d(TAG, "Inertial data received via sensor_data: ${inertialReading.timestamp}")
+                    lastDataReceivedTime = System.currentTimeMillis()
+                    onInertialDataReceived(inertialReading)
+                }
+                "biometric_data" -> {
+                    val biometricReading = DataSerializer.deserializeBiometricReading(payload.toByteArray())
+                    Log.d(TAG, "Biometric data received via sensor_data: ${biometricReading.timestamp}")
+                    lastDataReceivedTime = System.currentTimeMillis()
+                    onBiometricDataReceived(biometricReading)
+                }
+                else -> {
+                    Log.w(TAG, "Unknown sensor data type: $messageType")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling sensor data message", e)
+        }
+    }
+    
+    /**
+     * Handle command messages from wearable
+     */
+    private fun handleCommandMessage(data: ByteArray) {
+        try {
+            val commandData = String(data, Charsets.UTF_8)
+            val parts = commandData.split("|", limit = 2)
+            val command = parts[0]
+            val payload = if (parts.size > 1) parts[1] else ""
+            
+            Log.d(TAG, "Command received: $command")
+            
+            when (command) {
+                "start_collection" -> {
+                    val sessionId = if (payload.isNotEmpty()) payload else "wearable_${System.currentTimeMillis()}"
+                    onStartCollectionRequested?.invoke(sessionId)
+                }
+                "stop_collection" -> {
+                    onStopCollectionRequested?.invoke()
+                }
+                else -> {
+                    Log.w(TAG, "Unknown command: $command")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling command message", e)
+        }
+    }
+    
+    /**
+     * Handle status messages from wearable
+     */
+    private fun handleStatusMessage(data: ByteArray) {
+        try {
+            val status = String(data, Charsets.UTF_8)
+            Log.d(TAG, "Status received from wearable: $status")
+            
+            // Update connection status based on received status
+            lastDataReceivedTime = System.currentTimeMillis()
+            
+            when (status) {
+                "collecting", "idle" -> {
+                    if (_connectionStatus.value != ConnectionStatus.CONNECTED) {
+                        _connectionStatus.value = ConnectionStatus.CONNECTED
+                    }
+                }
+                "error" -> {
+                    Log.w(TAG, "Wearable reported error status")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling status message", e)
         }
     }
 

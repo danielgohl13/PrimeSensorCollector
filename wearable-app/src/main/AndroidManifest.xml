@@ -56,6 +56,11 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="health" />
+            
+        <!-- Declare wearable capability for smartphone discovery -->
+        <meta-data
+            android:name="com.google.android.wearable.api.capability"
+            android:value="wearable_data_collector" />
     </application>
 
 </manifest>

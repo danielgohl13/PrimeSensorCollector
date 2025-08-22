@@ -30,6 +30,20 @@ data class SessionData(
                 deviceId = deviceId
             )
         }
+        
+        /**
+         * Create a new session with a provided session ID
+         */
+        fun createWithId(sessionId: String, deviceId: String): SessionData {
+            return SessionData(
+                sessionId = sessionId,
+                startTime = System.currentTimeMillis(),
+                endTime = null,
+                isActive = true,
+                dataPointsCollected = 0,
+                deviceId = deviceId
+            )
+        }
     }
     
     /**

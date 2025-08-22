@@ -58,6 +58,8 @@ class MainActivity : ComponentActivity() {
     private var sessionDuration by mutableStateOf("00:00")
     private var connectionStatus by mutableStateOf(false)
     private var showLowBatteryWarning by mutableStateOf(false)
+    private var showCompletionMessage by mutableStateOf(false)
+    private var completionMessage by mutableStateOf("")
     
     // Battery monitoring
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -95,6 +97,8 @@ class MainActivity : ComponentActivity() {
                 sessionDuration = sessionDuration,
                 connectionStatus = connectionStatus,
                 showLowBatteryWarning = showLowBatteryWarning,
+                showCompletionMessage = showCompletionMessage,
+                completionMessage = completionMessage,
                 onTapGesture = { handleTapGesture() }
             )
         }
@@ -224,10 +228,13 @@ class MainActivity : ComponentActivity() {
             )
             
             if (success) {
+                // Start local sensor collection
+                sensorCollectionManager.startCollection(sessionId, deviceId)
+                
                 // Update local state
                 isCollecting = true
                 sessionStartTime = System.currentTimeMillis()
-                Log.d(TAG, "Start collection request sent successfully")
+                Log.d(TAG, "Start collection request sent successfully and local collection started")
             } else {
                 Log.e(TAG, "Failed to send start collection request")
             }
@@ -258,21 +265,46 @@ class MainActivity : ComponentActivity() {
             )
             
             if (success) {
+                // Stop local sensor collection
+                sensorCollectionManager.stopCollection()
+                
+                // Show completion feedback
+                showCompletionFeedback()
+                
                 // Update local state
                 isCollecting = false
                 sessionStartTime = null
-                Log.d(TAG, "Stop collection request sent successfully")
+                Log.d(TAG, "Stop collection request sent successfully and local collection stopped")
             } else {
                 Log.e(TAG, "Failed to send stop collection request")
-                // Still update local state
+                // Still stop local collection and update state
+                sensorCollectionManager.stopCollection()
+                showCompletionFeedback()
                 isCollecting = false
                 sessionStartTime = null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error requesting stop collection", e)
-            // Still update local state
+            // Still stop local collection and update state
+            sensorCollectionManager.stopCollection()
+            showCompletionFeedback()
             isCollecting = false
             sessionStartTime = null
+        }
+    }
+    
+    /**
+     * Show completion feedback to user
+     */
+    private fun showCompletionFeedback() {
+        val duration = sessionDuration
+        completionMessage = "Collection Complete\n$duration"
+        showCompletionMessage = true
+        
+        // Hide the message after 3 seconds
+        lifecycleScope.launch {
+            delay(3000)
+            showCompletionMessage = false
         }
     }
 }
@@ -288,6 +320,8 @@ fun WearApp(
     sessionDuration: String,
     connectionStatus: Boolean,
     showLowBatteryWarning: Boolean,
+    showCompletionMessage: Boolean,
+    completionMessage: String,
     onTapGesture: () -> Unit
 ) {
     PrimeSensorCollectorTheme {
@@ -359,6 +393,18 @@ fun WearApp(
                         color = Color.Red,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                
+                // Completion message
+                if (showCompletionMessage) {
+                    Text(
+                        text = completionMessage,
+                        color = Color.Green,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 }
@@ -437,6 +483,8 @@ fun DefaultPreview() {
         sessionDuration = "02:34",
         connectionStatus = true,
         showLowBatteryWarning = false,
+        showCompletionMessage = false,
+        completionMessage = "",
         onTapGesture = {}
     )
 }
@@ -450,6 +498,8 @@ fun CollectingPreview() {
         sessionDuration = "05:42",
         connectionStatus = true,
         showLowBatteryWarning = false,
+        showCompletionMessage = false,
+        completionMessage = "",
         onTapGesture = {}
     )
 }
@@ -463,6 +513,8 @@ fun LowBatteryPreview() {
         sessionDuration = "01:15",
         connectionStatus = false,
         showLowBatteryWarning = true,
+        showCompletionMessage = false,
+        completionMessage = "",
         onTapGesture = {}
     )
 }

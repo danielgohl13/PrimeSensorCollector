@@ -71,6 +71,12 @@ class CollectionViewModel(
                 },
                 onBiometricDataReceived = { biometricReading ->
                     handleBiometricDataReceived(biometricReading)
+                },
+                onStartCollectionRequested = { sessionId ->
+                    handleWearableStartRequest(sessionId)
+                },
+                onStopCollectionRequested = {
+                    handleWearableStopRequest()
                 }
             )
 
@@ -316,6 +322,27 @@ class CollectionViewModel(
             }
         }
     }
+    
+    /**
+     * Retry connection - force refresh connection status
+     */
+    fun retryConnection() {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Retrying connection...")
+                _errorMessage.value = null
+                val isConnected = communicationService?.refreshConnectionStatus() ?: false
+                if (isConnected) {
+                    Log.d(TAG, "Connection retry successful")
+                } else {
+                    _errorMessage.value = "Unable to connect to Galaxy Watch 5. Please ensure it's paired and nearby."
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error retrying connection", e)
+                _errorMessage.value = "Error retrying connection: ${e.message}"
+            }
+        }
+    }
 
     /**
      * Get current session duration in milliseconds
@@ -453,6 +480,92 @@ class CollectionViewModel(
         }
     }
     
+    /**
+     * Handle start collection request from wearable
+     */
+    private fun handleWearableStartRequest(sessionId: String) {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Wearable requested start collection with session: $sessionId")
+                
+                // Check if already collecting
+                if (_isCollecting.value) {
+                    Log.w(TAG, "Collection already in progress, ignoring wearable start request")
+                    return@launch
+                }
+                
+                // Check storage availability
+                if (!dataRepository.isStorageAvailable()) {
+                    _errorMessage.value = "Storage is not available. Please check permissions."
+                    return@launch
+                }
+                
+                // Check storage space
+                if (dataRepository.isStorageSpaceLow()) {
+                    Log.w(TAG, "Storage space is low, attempting cleanup...")
+                    val cleanupResult = dataRepository.cleanupOldFiles()
+                    if (cleanupResult.isSuccess) {
+                        val deletedCount = cleanupResult.getOrNull() ?: 0
+                        if (deletedCount > 0) {
+                            Log.i(TAG, "Cleaned up $deletedCount old files")
+                        }
+                    }
+                    
+                    if (dataRepository.isStorageSpaceLow()) {
+                        _errorMessage.value = "Storage space is critically low. Please free up space or delete old data files."
+                        return@launch
+                    }
+                }
+                
+                // Create new session with wearable-provided session ID
+                val session = dataRepository.createSessionWithId(sessionId, "galaxy_watch_5")
+                _sessionData.value = session
+                
+                // Update collection state
+                _isCollecting.value = true
+                _dataPointsCount.value = 0
+                _errorMessage.value = null
+                
+                Log.d(TAG, "Collection started from wearable request: $sessionId")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling wearable start request", e)
+                _errorMessage.value = "Error starting collection from wearable: ${e.message}"
+            }
+        }
+    }
+    
+    /**
+     * Handle stop collection request from wearable
+     */
+    private fun handleWearableStopRequest() {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Wearable requested stop collection")
+                
+                if (!_isCollecting.value) {
+                    Log.w(TAG, "No active collection session, ignoring wearable stop request")
+                    return@launch
+                }
+                
+                // Complete the session
+                _sessionData.value?.let { session ->
+                    val completedSession = session.complete().updateDataPoints(_dataPointsCount.value)
+                    _sessionData.value = completedSession
+                    Log.d(TAG, "Session completed from wearable: ${completedSession.sessionId}, Duration: ${completedSession.getDuration()}ms, Data points: ${completedSession.dataPointsCollected}")
+                }
+                
+                _isCollecting.value = false
+                _errorMessage.value = null
+                Log.d(TAG, "Collection stopped from wearable request")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling wearable stop request", e)
+                _errorMessage.value = "Error stopping collection from wearable: ${e.message}"
+            }
+        }
+    }
+
     /**
      * Clean up resources when ViewModel is destroyed
      */

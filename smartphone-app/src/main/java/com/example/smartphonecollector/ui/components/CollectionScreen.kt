@@ -56,6 +56,7 @@ fun CollectionScreen(
         // Connection Status
         ConnectionStatusIndicator(
             connectionStatus = connectionStatus,
+            onRetryClick = { viewModel.retryConnection() },
             modifier = Modifier.fillMaxWidth()
         )
 

@@ -70,6 +70,13 @@ class DataRepository(private val context: Context) {
     }
     
     /**
+     * Create a new session with provided session ID (for wearable-initiated sessions)
+     */
+    fun createSessionWithId(sessionId: String, deviceId: String = "default_device"): SessionData {
+        return SessionData.createWithId(sessionId, deviceId)
+    }
+    
+    /**
      * Save inertial data to CSV file
      * Requirements: 6.1, 6.3, 6.4
      */
