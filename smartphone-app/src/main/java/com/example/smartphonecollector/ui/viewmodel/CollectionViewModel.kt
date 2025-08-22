@@ -56,6 +56,7 @@ class CollectionViewModel(
 
     init {
         initializeCommunicationService()
+        startPeriodicMonitoring()
     }
 
     /**
@@ -90,7 +91,7 @@ class CollectionViewModel(
 
     /**
      * Start a new data collection session
-     * Requirements: 1.1, 1.2
+     * Requirements: 1.1, 1.2, 3.5 - Storage capacity monitoring
      */
     fun startCollection() {
         viewModelScope.launch {
@@ -114,6 +115,24 @@ class CollectionViewModel(
                 if (!dataRepository.isStorageAvailable()) {
                     _errorMessage.value = "Storage is not available. Please check permissions."
                     return@launch
+                }
+
+                // Check storage space and perform cleanup if needed
+                if (dataRepository.isStorageSpaceLow()) {
+                    Log.w(TAG, "Storage space is low, attempting cleanup...")
+                    val cleanupResult = dataRepository.cleanupOldFiles()
+                    if (cleanupResult.isSuccess) {
+                        val deletedCount = cleanupResult.getOrNull() ?: 0
+                        if (deletedCount > 0) {
+                            Log.i(TAG, "Cleaned up $deletedCount old files")
+                        }
+                    }
+                    
+                    // Check again after cleanup
+                    if (dataRepository.isStorageSpaceLow()) {
+                        _errorMessage.value = "Storage space is critically low. Please free up space or delete old data files."
+                        return@launch
+                    }
                 }
 
                 // Create new session
@@ -180,7 +199,7 @@ class CollectionViewModel(
 
     /**
      * Handle incoming inertial data from wearable
-     * Requirements: 5.4 - Real-time data update handlers
+     * Requirements: 5.4 - Real-time data update handlers, 5.5 - Low battery warning
      */
     private fun handleInertialDataReceived(inertialReading: InertialReading) {
         viewModelScope.launch {
@@ -190,11 +209,31 @@ class CollectionViewModel(
                 // Update real-time data for UI visualization
                 _realTimeInertialData.value = inertialReading
 
+                // Check battery level and handle low battery conditions
+                handleLowBatteryCondition(inertialReading.batteryLevel)
+
                 // Save data to repository
                 val result = dataRepository.appendInertialData(inertialReading.sessionId, inertialReading)
                 if (result.isFailure) {
                     Log.e(TAG, "Failed to save inertial data", result.exceptionOrNull())
-                    _errorMessage.value = "Failed to save inertial data: ${result.exceptionOrNull()?.message}"
+                    
+                    // Check if failure is due to storage issues
+                    if (dataRepository.isStorageSpaceLow()) {
+                        Log.w(TAG, "Storage space critically low, attempting emergency cleanup")
+                        val cleanupResult = dataRepository.performEmergencyCleanup()
+                        if (cleanupResult.isSuccess) {
+                            val cleanup = cleanupResult.getOrNull()
+                            _errorMessage.value = "Storage was full. Emergency cleanup freed ${cleanup?.spaceFreedMB}MB by deleting ${cleanup?.filesDeleted} old files."
+                        } else {
+                            _errorMessage.value = "Storage full and cleanup failed. Collection may be interrupted."
+                            // Consider stopping collection if storage is critically low
+                            if (_isCollecting.value) {
+                                stopCollection()
+                            }
+                        }
+                    } else {
+                        _errorMessage.value = "Failed to save inertial data: ${result.exceptionOrNull()?.message}"
+                    }
                 } else {
                     // Update data points count
                     _dataPointsCount.value = _dataPointsCount.value + 1
@@ -209,7 +248,7 @@ class CollectionViewModel(
 
     /**
      * Handle incoming biometric data from wearable
-     * Requirements: 5.4 - Real-time data update handlers
+     * Requirements: 5.4 - Real-time data update handlers, 5.5 - Low battery warning
      */
     private fun handleBiometricDataReceived(biometricReading: BiometricReading) {
         viewModelScope.launch {
@@ -219,11 +258,31 @@ class CollectionViewModel(
                 // Update real-time data for UI visualization
                 _realTimeBiometricData.value = biometricReading
 
+                // Check battery level and handle low battery conditions
+                handleLowBatteryCondition(biometricReading.batteryLevel)
+
                 // Save data to repository
                 val result = dataRepository.appendBiometricData(biometricReading.sessionId, biometricReading)
                 if (result.isFailure) {
                     Log.e(TAG, "Failed to save biometric data", result.exceptionOrNull())
-                    _errorMessage.value = "Failed to save biometric data: ${result.exceptionOrNull()?.message}"
+                    
+                    // Check if failure is due to storage issues
+                    if (dataRepository.isStorageSpaceLow()) {
+                        Log.w(TAG, "Storage space critically low, attempting emergency cleanup")
+                        val cleanupResult = dataRepository.performEmergencyCleanup()
+                        if (cleanupResult.isSuccess) {
+                            val cleanup = cleanupResult.getOrNull()
+                            _errorMessage.value = "Storage was full. Emergency cleanup freed ${cleanup?.spaceFreedMB}MB by deleting ${cleanup?.filesDeleted} old files."
+                        } else {
+                            _errorMessage.value = "Storage full and cleanup failed. Collection may be interrupted."
+                            // Consider stopping collection if storage is critically low
+                            if (_isCollecting.value) {
+                                stopCollection()
+                            }
+                        }
+                    } else {
+                        _errorMessage.value = "Failed to save biometric data: ${result.exceptionOrNull()?.message}"
+                    }
                 } else {
                     // Update data points count
                     _dataPointsCount.value = _dataPointsCount.value + 1
@@ -281,9 +340,40 @@ class CollectionViewModel(
         val batteryLevel = getCurrentBatteryLevel()
         return batteryLevel != null && batteryLevel < 20
     }
+    
+    /**
+     * Check if battery is critically low (below 15%) and should stop collection
+     * Requirements: 7.5 - Low battery detection and warning systems
+     */
+    fun isBatteryCriticallyLow(): Boolean {
+        val batteryLevel = getCurrentBatteryLevel()
+        return batteryLevel != null && batteryLevel < 15
+    }
+    
+    /**
+     * Handle low battery condition by stopping collection if critically low
+     * Requirements: 7.5 - Automatic collection stop at low battery
+     */
+    private fun handleLowBatteryCondition(batteryLevel: Int) {
+        when {
+            batteryLevel < 15 -> {
+                if (_isCollecting.value) {
+                    Log.w(TAG, "Battery critically low ($batteryLevel%), stopping collection automatically")
+                    _errorMessage.value = "Collection stopped automatically due to critically low battery ($batteryLevel%)"
+                    viewModelScope.launch {
+                        stopCollection()
+                    }
+                }
+            }
+            batteryLevel < 20 -> {
+                _errorMessage.value = "Warning: Battery is low ($batteryLevel%). Consider stopping collection soon."
+            }
+        }
+    }
 
     /**
      * Get storage information
+     * Requirements: 3.5 - Storage capacity monitoring
      */
     fun getStorageInfo(): Pair<Boolean, Long> {
         return Pair(
@@ -291,7 +381,78 @@ class CollectionViewModel(
             dataRepository.getAvailableStorageSpace()
         )
     }
+    
+    /**
+     * Get detailed storage statistics
+     * Requirements: 3.5 - Storage capacity monitoring
+     */
+    fun getStorageStatistics() {
+        viewModelScope.launch {
+            try {
+                val result = dataRepository.getStorageStatistics()
+                if (result.isSuccess) {
+                    val stats = result.getOrNull()
+                    Log.d(TAG, "Storage statistics: ${stats?.freeSpaceMB}MB free, ${stats?.appDataSizeMB}MB app data, ${stats?.fileCount} files")
+                    
+                    // Check if storage is getting low and warn user
+                    if (stats?.isLowSpace == true) {
+                        _errorMessage.value = "Warning: Storage space is low (${stats.freeSpaceMB}MB remaining). Consider cleaning up old data files."
+                    }
+                } else {
+                    Log.e(TAG, "Failed to get storage statistics", result.exceptionOrNull())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error getting storage statistics", e)
+            }
+        }
+    }
+    
+    /**
+     * Perform manual cleanup of old files
+     * Requirements: 3.5 - Storage capacity monitoring and cleanup mechanisms
+     */
+    fun performCleanup() {
+        viewModelScope.launch {
+            try {
+                val result = dataRepository.cleanupOldFiles()
+                if (result.isSuccess) {
+                    val deletedCount = result.getOrNull() ?: 0
+                    if (deletedCount > 0) {
+                        _errorMessage.value = "Cleanup completed: deleted $deletedCount old files"
+                    } else {
+                        _errorMessage.value = "No old files found to clean up"
+                    }
+                } else {
+                    _errorMessage.value = "Cleanup failed: ${result.exceptionOrNull()?.message}"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error performing cleanup", e)
+                _errorMessage.value = "Error performing cleanup: ${e.message}"
+            }
+        }
+    }
 
+    /**
+     * Start periodic monitoring of storage and connection status
+     * Requirements: 3.5, 5.4 - Storage capacity monitoring
+     */
+    private fun startPeriodicMonitoring() {
+        viewModelScope.launch {
+            while (true) {
+                try {
+                    // Check storage statistics periodically
+                    getStorageStatistics()
+                    
+                    // Wait 30 seconds before next check
+                    kotlinx.coroutines.delay(30000)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in periodic monitoring", e)
+                    kotlinx.coroutines.delay(60000) // Wait longer on error
+                }
+            }
+        }
+    }
+    
     /**
      * Clean up resources when ViewModel is destroyed
      */

@@ -202,16 +202,40 @@ class WearableCommunicationService(
     }
 
     /**
-     * Start monitoring connection status periodically
+     * Start monitoring connection status with automatic reconnection
+     * Requirements: 8.2, 8.3, 8.4 - Connection loss handling with automatic reconnection
      */
     private fun startConnectionMonitoring() {
         serviceScope.launch {
+            var consecutiveFailures = 0
+            val maxConsecutiveFailures = 6 // 30 seconds of failures before error state
+            
             while (true) {
                 try {
-                    checkConnectionStatus()
+                    val wasConnected = _connectionStatus.value == ConnectionStatus.CONNECTED
+                    val isConnected = checkConnectionStatus()
+                    
+                    if (isConnected) {
+                        consecutiveFailures = 0
+                        if (!wasConnected) {
+                            Log.i(TAG, "Connection restored to wearable device")
+                        }
+                    } else {
+                        consecutiveFailures++
+                        if (consecutiveFailures >= maxConsecutiveFailures) {
+                            _connectionStatus.value = ConnectionStatus.ERROR
+                            Log.e(TAG, "Connection lost for ${consecutiveFailures * 5} seconds - entering error state")
+                        } else if (wasConnected) {
+                            _connectionStatus.value = ConnectionStatus.CONNECTING
+                            Log.w(TAG, "Connection lost, attempting to reconnect... (attempt $consecutiveFailures/$maxConsecutiveFailures)")
+                        }
+                    }
+                    
                     kotlinx.coroutines.delay(5000) // Check every 5 seconds
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in connection monitoring", e)
+                    consecutiveFailures++
+                    _connectionStatus.value = ConnectionStatus.ERROR
                     kotlinx.coroutines.delay(10000) // Wait longer on error
                 }
             }

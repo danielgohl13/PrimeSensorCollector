@@ -74,29 +74,51 @@ class WearableCommunicationClientImpl(
     }
     
     /**
-     * Send a message to the connected smartphone
+     * Send a message to the connected smartphone with automatic reconnection
+     * Requirements: 8.2, 8.3 - Connection loss handling with automatic reconnection
      */
     override suspend fun sendMessage(messageType: String, data: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val nodeId = connectedNodeId ?: run {
-                updateConnectedNodes()
-                connectedNodeId
+        var attempts = 0
+        val maxAttempts = 3
+        
+        while (attempts < maxAttempts) {
+            try {
+                val nodeId = connectedNodeId ?: run {
+                    Log.d(TAG, "No connected node, attempting to find one...")
+                    updateConnectedNodes()
+                    connectedNodeId
+                }
+                
+                if (nodeId == null) {
+                    Log.w(TAG, "No connected node found for message transmission (attempt ${attempts + 1}/$maxAttempts)")
+                    attempts++
+                    if (attempts < maxAttempts) {
+                        kotlinx.coroutines.delay(1000) // Wait before retry
+                    }
+                    continue
+                }
+                
+                val messageData = createMessageData(messageType, data)
+                val result = messageClient.sendMessage(nodeId, DATA_MESSAGE_PATH, messageData).await()
+                
+                Log.d(TAG, "Message sent successfully: $messageType (${data.length} chars)")
+                return@withContext true
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send message: $messageType (attempt ${attempts + 1}/$maxAttempts)", e)
+                
+                // Connection might be lost, clear cached node ID
+                connectedNodeId = null
+                
+                attempts++
+                if (attempts < maxAttempts) {
+                    kotlinx.coroutines.delay(1000) // Wait before retry
+                }
             }
-            
-            if (nodeId == null) {
-                Log.w(TAG, "No connected node found for message transmission")
-                return@withContext false
-            }
-            
-            val messageData = createMessageData(messageType, data)
-            val result = messageClient.sendMessage(nodeId, DATA_MESSAGE_PATH, messageData).await()
-            
-            Log.d(TAG, "Message sent successfully: $messageType (${data.length} chars)")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send message: $messageType", e)
-            false
         }
+        
+        Log.e(TAG, "Failed to send message after $maxAttempts attempts: $messageType")
+        return@withContext false
     }
     
     /**
@@ -193,23 +215,43 @@ class WearableCommunicationClientImpl(
     }
     
     /**
-     * Update the list of connected nodes
+     * Update the list of connected nodes with retry logic
+     * Requirements: 8.2, 8.3 - Connection loss handling with automatic reconnection
      */
     private suspend fun updateConnectedNodes() {
-        try {
-            val nodes = nodeClient.connectedNodes.await()
-            val firstNode = nodes.firstOrNull()
-            connectedNodeId = firstNode?.id
-            
-            if (connectedNodeId != null) {
-                Log.d(TAG, "Connected to node: $connectedNodeId")
-            } else {
-                Log.w(TAG, "No connected nodes found")
+        var retryCount = 0
+        val maxRetries = 3
+        
+        while (retryCount < maxRetries) {
+            try {
+                val nodes = nodeClient.connectedNodes.await()
+                val firstNode = nodes.firstOrNull()
+                val previousNodeId = connectedNodeId
+                connectedNodeId = firstNode?.id
+                
+                if (connectedNodeId != null) {
+                    if (previousNodeId != connectedNodeId) {
+                        Log.i(TAG, "Connected to node: $connectedNodeId")
+                    }
+                    return // Success, exit retry loop
+                } else {
+                    Log.w(TAG, "No connected nodes found (attempt ${retryCount + 1}/$maxRetries)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating connected nodes (attempt ${retryCount + 1}/$maxRetries)", e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating connected nodes", e)
-            connectedNodeId = null
+            
+            retryCount++
+            if (retryCount < maxRetries) {
+                kotlinx.coroutines.delay(2000) // Wait 2 seconds before retry
+            }
         }
+        
+        // All retries failed
+        if (connectedNodeId != null) {
+            Log.w(TAG, "Lost connection to smartphone after $maxRetries attempts")
+        }
+        connectedNodeId = null
     }
     
     /**

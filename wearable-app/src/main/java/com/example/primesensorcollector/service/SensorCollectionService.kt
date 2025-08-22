@@ -189,7 +189,8 @@ class SensorCollectionService : Service(), SensorEventListener {
     }
     
     /**
-     * Initialize inertial sensors
+     * Initialize inertial sensors with availability checking
+     * Requirements: 2.5 - Sensor availability checking and graceful degradation
      */
     private fun initializeSensors() {
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -200,6 +201,40 @@ class SensorCollectionService : Service(), SensorEventListener {
         Log.d(TAG, "  Accelerometer: ${accelerometer != null}")
         Log.d(TAG, "  Gyroscope: ${gyroscope != null}")
         Log.d(TAG, "  Magnetometer: ${magnetometer != null}")
+        
+        // Check sensor availability and warn about missing sensors
+        val availableSensors = mutableListOf<String>()
+        val missingSensors = mutableListOf<String>()
+        
+        if (accelerometer != null) {
+            availableSensors.add("Accelerometer")
+        } else {
+            missingSensors.add("Accelerometer")
+            Log.w(TAG, "Accelerometer not available - motion data will be incomplete")
+        }
+        
+        if (gyroscope != null) {
+            availableSensors.add("Gyroscope")
+        } else {
+            missingSensors.add("Gyroscope")
+            Log.w(TAG, "Gyroscope not available - rotation data will be incomplete")
+        }
+        
+        if (magnetometer != null) {
+            availableSensors.add("Magnetometer")
+        } else {
+            missingSensors.add("Magnetometer")
+            Log.w(TAG, "Magnetometer not available - magnetic field data will be incomplete")
+        }
+        
+        if (availableSensors.isEmpty()) {
+            Log.e(TAG, "No inertial sensors available - data collection will not function properly")
+        } else {
+            Log.i(TAG, "Available sensors: ${availableSensors.joinToString(", ")}")
+            if (missingSensors.isNotEmpty()) {
+                Log.w(TAG, "Missing sensors: ${missingSensors.joinToString(", ")} - collection will continue with available sensors")
+            }
+        }
     }
     
     /**
@@ -295,34 +330,74 @@ class SensorCollectionService : Service(), SensorEventListener {
     }
     
     /**
-     * Register sensor listeners for inertial sensors
+     * Register sensor listeners for inertial sensors with error handling
+     * Requirements: 2.5 - Graceful degradation when sensors become unavailable
      */
     private fun registerSensorListeners() {
+        var registeredSensors = 0
+        
         accelerometer?.let { sensor ->
-            val success = sensorManager.registerListener(
-                this, 
-                sensor, 
-                SENSOR_DELAY_MICROSECONDS
-            )
-            Log.d(TAG, "Accelerometer registration: $success")
-        }
+            try {
+                val success = sensorManager.registerListener(
+                    this, 
+                    sensor, 
+                    SENSOR_DELAY_MICROSECONDS
+                )
+                if (success) {
+                    registeredSensors++
+                    Log.d(TAG, "Accelerometer registration: success")
+                } else {
+                    Log.e(TAG, "Accelerometer registration failed")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering accelerometer listener", e)
+            }
+        } ?: Log.w(TAG, "Accelerometer not available for registration")
         
         gyroscope?.let { sensor ->
-            val success = sensorManager.registerListener(
-                this, 
-                sensor, 
-                SENSOR_DELAY_MICROSECONDS
-            )
-            Log.d(TAG, "Gyroscope registration: $success")
-        }
+            try {
+                val success = sensorManager.registerListener(
+                    this, 
+                    sensor, 
+                    SENSOR_DELAY_MICROSECONDS
+                )
+                if (success) {
+                    registeredSensors++
+                    Log.d(TAG, "Gyroscope registration: success")
+                } else {
+                    Log.e(TAG, "Gyroscope registration failed")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering gyroscope listener", e)
+            }
+        } ?: Log.w(TAG, "Gyroscope not available for registration")
         
         magnetometer?.let { sensor ->
-            val success = sensorManager.registerListener(
-                this, 
-                sensor, 
-                SENSOR_DELAY_MICROSECONDS
-            )
-            Log.d(TAG, "Magnetometer registration: $success")
+            try {
+                val success = sensorManager.registerListener(
+                    this, 
+                    sensor, 
+                    SENSOR_DELAY_MICROSECONDS
+                )
+                if (success) {
+                    registeredSensors++
+                    Log.d(TAG, "Magnetometer registration: success")
+                } else {
+                    Log.e(TAG, "Magnetometer registration failed")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering magnetometer listener", e)
+            }
+        } ?: Log.w(TAG, "Magnetometer not available for registration")
+        
+        if (registeredSensors == 0) {
+            Log.e(TAG, "No sensors successfully registered - data collection will not function")
+            // Report error to smartphone
+            serviceScope.launch {
+                communicationClient.reportStatus("ERROR_NO_SENSORS")
+            }
+        } else {
+            Log.i(TAG, "Successfully registered $registeredSensors sensors")
         }
     }
     
@@ -360,10 +435,36 @@ class SensorCollectionService : Service(), SensorEventListener {
     }
     
     /**
-     * Handle sensor accuracy changes
+     * Handle sensor accuracy changes with error detection
+     * Requirements: 2.5 - Detect and handle sensor failures
      */
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        Log.d(TAG, "Sensor accuracy changed: ${sensor?.name} -> $accuracy")
+        val sensorName = sensor?.name ?: "Unknown"
+        Log.d(TAG, "Sensor accuracy changed: $sensorName -> $accuracy")
+        
+        when (accuracy) {
+            SensorManager.SENSOR_STATUS_NO_CONTACT -> {
+                Log.e(TAG, "Sensor $sensorName lost contact - data may be unreliable")
+            }
+            SensorManager.SENSOR_STATUS_UNRELIABLE -> {
+                Log.w(TAG, "Sensor $sensorName is unreliable - data quality may be poor")
+            }
+            SensorManager.SENSOR_STATUS_ACCURACY_LOW -> {
+                Log.w(TAG, "Sensor $sensorName has low accuracy")
+            }
+            SensorManager.SENSOR_STATUS_ACCURACY_MEDIUM -> {
+                Log.d(TAG, "Sensor $sensorName has medium accuracy")
+            }
+            SensorManager.SENSOR_STATUS_ACCURACY_HIGH -> {
+                Log.d(TAG, "Sensor $sensorName has high accuracy")
+            }
+        }
+        
+        // If sensor becomes unreliable or loses contact, continue with available sensors
+        if (accuracy == SensorManager.SENSOR_STATUS_NO_CONTACT || 
+            accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE) {
+            Log.w(TAG, "Sensor $sensorName degraded - continuing collection with remaining sensors")
+        }
     }
     
     /**
@@ -426,11 +527,28 @@ class SensorCollectionService : Service(), SensorEventListener {
     }
     
     /**
-     * Get current battery level
+     * Get current battery level and handle low battery conditions
+     * Requirements: 7.5 - Low battery detection and warning systems
      */
     private fun getBatteryLevel(): Int {
         val batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        return batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val batteryLevel = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        
+        // Check for critically low battery and stop collection if needed
+        if (batteryLevel <= 15 && isCollecting) {
+            Log.w(TAG, "Battery critically low ($batteryLevel%), stopping collection automatically")
+            serviceScope.launch {
+                communicationClient.reportStatus("BATTERY_CRITICAL_STOPPING")
+                stopCollection()
+            }
+        } else if (batteryLevel <= 20 && isCollecting) {
+            Log.w(TAG, "Battery low ($batteryLevel%), consider stopping collection soon")
+            serviceScope.launch {
+                communicationClient.reportStatus("BATTERY_LOW_WARNING")
+            }
+        }
+        
+        return batteryLevel
     }
     
     /**

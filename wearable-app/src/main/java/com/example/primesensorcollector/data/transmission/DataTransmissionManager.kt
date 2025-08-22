@@ -306,17 +306,29 @@ class DataTransmissionManager(
     }
     
     /**
-     * Monitor connection status with the smartphone
+     * Monitor connection status and buffer capacity
+     * Requirements: 8.2, 8.3, 8.4 - Connection loss handling, buffer capacity monitoring
      */
     private fun monitorConnectionStatus() {
         transmissionScope.launch {
             while (isActive) {
                 try {
                     val connected = communicationClient.isConnected()
+                    val wasConnected = _isConnected.value
                     _isConnected.value = connected
                     
-                    if (!connected) {
-                        Log.w(TAG, "Connection to smartphone lost")
+                    if (!connected && wasConnected) {
+                        Log.w(TAG, "Connection to smartphone lost - buffering data locally")
+                    } else if (connected && !wasConnected) {
+                        Log.i(TAG, "Connection to smartphone restored - will sync buffered data")
+                    }
+                    
+                    // Check buffer capacity and warn if getting full
+                    val bufferStats = getBufferStatistics()
+                    if (bufferStats.utilizationPercentage >= 90) {
+                        Log.e(TAG, "Buffer capacity critical: ${bufferStats.utilizationPercentage}% full")
+                    } else if (bufferStats.utilizationPercentage >= 80) {
+                        Log.w(TAG, "Buffer capacity high: ${bufferStats.utilizationPercentage}% full")
                     }
                     
                     delay(5000) // Check every 5 seconds

@@ -13,6 +13,7 @@ import java.io.FileWriter
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
+import android.util.Log
 
 /**
  * Repository class responsible for data persistence and file operations
@@ -207,6 +208,7 @@ class DataRepository(private val context: Context) {
     
     /**
      * Check if storage directory is accessible and writable
+     * Requirements: 3.5, 5.4 - Storage capacity monitoring
      */
     fun isStorageAvailable(): Boolean {
         return try {
@@ -219,12 +221,58 @@ class DataRepository(private val context: Context) {
     
     /**
      * Get available storage space in bytes
+     * Requirements: 3.5, 5.4 - Storage capacity monitoring
      */
     fun getAvailableStorageSpace(): Long {
         return try {
             getAppDirectory().freeSpace
         } catch (e: Exception) {
             0L
+        }
+    }
+    
+    /**
+     * Check if storage space is critically low (less than 100MB)
+     * Requirements: 3.5 - Storage capacity monitoring and cleanup mechanisms
+     */
+    fun isStorageSpaceLow(): Boolean {
+        val availableSpace = getAvailableStorageSpace()
+        val criticalThreshold = 100 * 1024 * 1024L // 100MB
+        return availableSpace < criticalThreshold
+    }
+    
+    /**
+     * Get storage usage statistics
+     * Requirements: 3.5 - Storage capacity monitoring
+     */
+    suspend fun getStorageStatistics(): Result<StorageStatistics> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val appDir = getAppDirectory()
+                val totalSpace = appDir.totalSpace
+                val freeSpace = appDir.freeSpace
+                val usedSpace = totalSpace - freeSpace
+                
+                val csvFiles = appDir.listFiles { file ->
+                    file.isFile && file.name.endsWith(CSV_EXTENSION)
+                }?.toList() ?: emptyList()
+                
+                val appDataSize = csvFiles.sumOf { it.length() }
+                val fileCount = csvFiles.size
+                
+                val statistics = StorageStatistics(
+                    totalSpace = totalSpace,
+                    freeSpace = freeSpace,
+                    usedSpace = usedSpace,
+                    appDataSize = appDataSize,
+                    fileCount = fileCount,
+                    isLowSpace = isStorageSpaceLow()
+                )
+                
+                Result.success(statistics)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
     
@@ -292,6 +340,7 @@ class DataRepository(private val context: Context) {
     
     /**
      * Delete old session files to free up space
+     * Requirements: 3.5 - Storage capacity monitoring and cleanup mechanisms
      */
     suspend fun cleanupOldFiles(maxAgeMillis: Long = 7 * 24 * 60 * 60 * 1000L): Result<Int> {
         return withContext(Dispatchers.IO) {
@@ -299,15 +348,22 @@ class DataRepository(private val context: Context) {
                 val appDir = getAppDirectory()
                 val currentTime = System.currentTimeMillis()
                 var deletedCount = 0
+                var freedSpace = 0L
                 
                 appDir.listFiles { file ->
                     file.isFile && file.name.endsWith(CSV_EXTENSION)
                 }?.forEach { file ->
                     if (currentTime - file.lastModified() > maxAgeMillis) {
+                        val fileSize = file.length()
                         if (file.delete()) {
                             deletedCount++
+                            freedSpace += fileSize
                         }
                     }
+                }
+                
+                if (deletedCount > 0) {
+                    Log.i("DataRepository", "Cleaned up $deletedCount old files, freed ${freedSpace / 1024 / 1024}MB")
                 }
                 
                 Result.success(deletedCount)
@@ -316,4 +372,80 @@ class DataRepository(private val context: Context) {
             }
         }
     }
+    
+    /**
+     * Perform emergency cleanup when storage is critically low
+     * Requirements: 3.5 - Storage capacity monitoring and cleanup mechanisms
+     */
+    suspend fun performEmergencyCleanup(): Result<CleanupResult> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val appDir = getAppDirectory()
+                val csvFiles = appDir.listFiles { file ->
+                    file.isFile && file.name.endsWith(CSV_EXTENSION)
+                }?.toList() ?: emptyList()
+                
+                // Sort files by last modified time (oldest first)
+                val sortedFiles = csvFiles.sortedBy { it.lastModified() }
+                
+                var deletedCount = 0
+                var freedSpace = 0L
+                val targetFreeSpace = 200 * 1024 * 1024L // Target 200MB free space
+                
+                for (file in sortedFiles) {
+                    if (getAvailableStorageSpace() >= targetFreeSpace) {
+                        break // Enough space freed
+                    }
+                    
+                    val fileSize = file.length()
+                    if (file.delete()) {
+                        deletedCount++
+                        freedSpace += fileSize
+                        Log.d("DataRepository", "Emergency cleanup: deleted ${file.name} (${fileSize / 1024}KB)")
+                    }
+                }
+                
+                val result = CleanupResult(
+                    filesDeleted = deletedCount,
+                    spaceFreed = freedSpace,
+                    finalFreeSpace = getAvailableStorageSpace()
+                )
+                
+                Log.i("DataRepository", "Emergency cleanup completed: deleted $deletedCount files, freed ${freedSpace / 1024 / 1024}MB")
+                Result.success(result)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+}
+/**
+
+ * Storage statistics for monitoring disk usage
+ * Requirements: 3.5 - Storage capacity monitoring
+ */
+data class StorageStatistics(
+    val totalSpace: Long,
+    val freeSpace: Long,
+    val usedSpace: Long,
+    val appDataSize: Long,
+    val fileCount: Int,
+    val isLowSpace: Boolean
+) {
+    val freeSpacePercentage: Int = ((freeSpace.toDouble() / totalSpace) * 100).toInt()
+    val appDataSizeMB: Long = appDataSize / 1024 / 1024
+    val freeSpaceMB: Long = freeSpace / 1024 / 1024
+}
+
+/**
+ * Result of cleanup operations
+ * Requirements: 3.5 - Storage capacity monitoring and cleanup mechanisms
+ */
+data class CleanupResult(
+    val filesDeleted: Int,
+    val spaceFreed: Long,
+    val finalFreeSpace: Long
+) {
+    val spaceFreedMB: Long = spaceFreed / 1024 / 1024
+    val finalFreeSpaceMB: Long = finalFreeSpace / 1024 / 1024
 }
