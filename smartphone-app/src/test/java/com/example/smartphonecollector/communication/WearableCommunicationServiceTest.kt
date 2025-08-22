@@ -5,175 +5,242 @@ import com.example.smartphonecollector.data.models.BiometricReading
 import com.example.smartphonecollector.data.models.InertialReading
 import com.example.smartphonecollector.data.models.Vector3D
 import com.example.smartphonecollector.data.serialization.DataSerializer
-import com.google.android.gms.wearable.MessageEvent
+import com.google.android.gms.wearable.*
 import io.mockk.*
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import org.junit.After
-import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import org.junit.Assert.*
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
-@ExperimentalCoroutinesApi
 @RunWith(RobolectricTestRunner::class)
 class WearableCommunicationServiceTest {
 
     private lateinit var context: Context
-    private lateinit var communicationService: WearableCommunicationService
+    private lateinit var mockMessageClient: MessageClient
+    private lateinit var mockDataClient: DataClient
+    private lateinit var mockNodeClient: NodeClient
+    private lateinit var mockCapabilityClient: CapabilityClient
     
-    private val mockInertialDataReceived = mockk<(InertialReading) -> Unit>(relaxed = true)
-    private val mockBiometricDataReceived = mockk<(BiometricReading) -> Unit>(relaxed = true)
+    private var receivedInertialData: InertialReading? = null
+    private var receivedBiometricData: BiometricReading? = null
+    
+    private lateinit var service: WearableCommunicationService
 
     @Before
     fun setup() {
-        MockKAnnotations.init(this)
         context = RuntimeEnvironment.getApplication()
         
-        communicationService = WearableCommunicationService(
+        // Mock Wearable API clients
+        mockMessageClient = mockk(relaxed = true)
+        mockDataClient = mockk(relaxed = true)
+        mockNodeClient = mockk(relaxed = true)
+        mockCapabilityClient = mockk(relaxed = true)
+        
+        // Mock static Wearable methods
+        mockkStatic(Wearable::class)
+        every { Wearable.getMessageClient(any()) } returns mockMessageClient
+        every { Wearable.getDataClient(any()) } returns mockDataClient
+        every { Wearable.getNodeClient(any()) } returns mockNodeClient
+        every { Wearable.getCapabilityClient(any()) } returns mockCapabilityClient
+        
+        // Reset received data
+        receivedInertialData = null
+        receivedBiometricData = null
+        
+        // Create service with callbacks
+        service = WearableCommunicationService(
             context = context,
-            onInertialDataReceived = mockInertialDataReceived,
-            onBiometricDataReceived = mockBiometricDataReceived
+            onInertialDataReceived = { receivedInertialData = it },
+            onBiometricDataReceived = { receivedBiometricData = it }
         )
     }
 
     @After
-    fun tearDown() {
-        communicationService.cleanup()
-        clearAllMocks()
+    fun cleanup() {
+        service.cleanup()
+        unmockkAll()
     }
 
-    @Test
-    fun `connectionStatus should start as DISCONNECTED`() {
-        assertEquals(ConnectionStatus.DISCONNECTED, communicationService.connectionStatus.value)
-    }
-
-    @Test
-    fun `onMessageReceived should handle inertial data correctly`() {
-        // Given
-        val inertialReading = InertialReading(
+    private fun createSampleInertialReading(): InertialReading {
+        return InertialReading(
             timestamp = System.currentTimeMillis(),
             sessionId = "test_session",
             deviceId = "test_device",
-            accelerometer = Vector3D(1.0f, 2.0f, 3.0f),
-            gyroscope = Vector3D(0.1f, 0.2f, 0.3f),
-            magnetometer = Vector3D(10.0f, 20.0f, 30.0f),
+            accelerometer = Vector3D(0.1f, 0.2f, 9.8f),
+            gyroscope = Vector3D(0.01f, 0.02f, 0.03f),
+            magnetometer = Vector3D(45.0f, -12.0f, 8.0f),
             batteryLevel = 85
         )
-        
-        val serializedData = DataSerializer.serializeInertialReadingToBytes(inertialReading)
-        val messageEvent = mockk<MessageEvent> {
-            every { path } returns "/inertial_data"
-            every { data } returns serializedData
-        }
-
-        // When
-        communicationService.onMessageReceived(messageEvent)
-
-        // Then
-        verify { mockInertialDataReceived(any()) }
     }
 
-    @Test
-    fun `onMessageReceived should handle biometric data correctly`() {
-        // Given
-        val biometricReading = BiometricReading(
+    private fun createSampleBiometricReading(): BiometricReading {
+        return BiometricReading(
             timestamp = System.currentTimeMillis(),
             sessionId = "test_session",
             deviceId = "test_device",
             heartRate = 72,
             stepCount = 1000,
             calories = 50.5f,
-            skinTemperature = 36.5f,
+            skinTemperature = 32.1f,
             batteryLevel = 85
         )
+    }
+
+    @Test
+    fun `service initializes with correct connection status`() {
+        assertEquals(ConnectionStatus.DISCONNECTED, service.connectionStatus.value)
+    }
+
+    @Test
+    fun `service registers listeners on initialization`() {
+        verify { mockMessageClient.addListener(service) }
+        verify { mockDataClient.addListener(service) }
+    }
+
+    @Test
+    fun `cleanup removes listeners`() {
+        service.cleanup()
         
+        verify { mockMessageClient.removeListener(service) }
+        verify { mockDataClient.removeListener(service) }
+    }
+
+    @Test
+    fun `onMessageReceived handles inertial data path`() {
+        val inertialReading = createSampleInertialReading()
+        val serializedData = DataSerializer.serializeInertialReadingToBytes(inertialReading)
+        
+        val messageEvent = mockk<MessageEvent> {
+            every { path } returns "/inertial_data"
+            every { data } returns serializedData
+        }
+        
+        service.onMessageReceived(messageEvent)
+        
+        assertNotNull("Inertial data should be received", receivedInertialData)
+        assertEquals("Session ID should match", inertialReading.sessionId, receivedInertialData?.sessionId)
+        assertEquals("Device ID should match", inertialReading.deviceId, receivedInertialData?.deviceId)
+    }
+
+    @Test
+    fun `onMessageReceived handles biometric data path`() {
+        val biometricReading = createSampleBiometricReading()
         val serializedData = DataSerializer.serializeBiometricReadingToBytes(biometricReading)
+        
         val messageEvent = mockk<MessageEvent> {
             every { path } returns "/biometric_data"
             every { data } returns serializedData
         }
-
-        // When
-        communicationService.onMessageReceived(messageEvent)
-
-        // Then
-        verify { mockBiometricDataReceived(any()) }
+        
+        service.onMessageReceived(messageEvent)
+        
+        assertNotNull("Biometric data should be received", receivedBiometricData)
+        assertEquals("Session ID should match", biometricReading.sessionId, receivedBiometricData?.sessionId)
+        assertEquals("Heart rate should match", biometricReading.heartRate, receivedBiometricData?.heartRate)
     }
 
     @Test
-    fun `onMessageReceived should ignore unknown message paths`() {
-        // Given
+    fun `onMessageReceived ignores unknown paths`() {
         val messageEvent = mockk<MessageEvent> {
             every { path } returns "/unknown_path"
             every { data } returns byteArrayOf()
         }
-
-        // When
-        communicationService.onMessageReceived(messageEvent)
-
-        // Then
-        verify(exactly = 0) { mockInertialDataReceived(any()) }
-        verify(exactly = 0) { mockBiometricDataReceived(any()) }
+        
+        service.onMessageReceived(messageEvent)
+        
+        assertNull("No inertial data should be received", receivedInertialData)
+        assertNull("No biometric data should be received", receivedBiometricData)
     }
 
     @Test
-    fun `cleanup should remove listeners`() {
-        // When
-        communicationService.cleanup()
-
-        // Then - no exception should be thrown
-        // This test mainly ensures cleanup doesn't crash
-        assertNotNull(communicationService)
-    }
-
-    @Test
-    fun `startCollection should handle session ID correctly`() = runTest {
-        // Given
-        val sessionId = "test_session_123"
-
-        // When - This will fail in test environment due to missing Google Play Services
-        // but we can test that it doesn't crash
-        val result = try {
-            communicationService.startCollection(sessionId)
-        } catch (e: Exception) {
-            // Expected in test environment
-            false
+    fun `onMessageReceived handles deserialization errors gracefully`() {
+        val messageEvent = mockk<MessageEvent> {
+            every { path } returns "/inertial_data"
+            every { data } returns byteArrayOf(1, 2, 3) // Invalid data
         }
-
-        // Then - Should not crash and return a boolean
-        assert(result is Boolean)
+        
+        // Should not throw exception
+        service.onMessageReceived(messageEvent)
+        
+        assertNull("No inertial data should be received on error", receivedInertialData)
     }
 
     @Test
-    fun `stopCollection should handle gracefully`() = runTest {
-        // When - This will fail in test environment due to missing Google Play Services
-        // but we can test that it doesn't crash
-        val result = try {
-            communicationService.stopCollection()
-        } catch (e: Exception) {
-            // Expected in test environment
-            false
+    fun `onDataChanged handles data events correctly`() {
+        val mockDataItem = mockk<DataItem> {
+            every { uri.path } returns "/inertial_data"
         }
-
-        // Then - Should not crash and return a boolean
-        assert(result is Boolean)
+        
+        val mockDataEvent = mockk<DataEvent> {
+            every { type } returns DataEvent.TYPE_CHANGED
+            every { dataItem } returns mockDataItem
+        }
+        
+        val mockDataEventBuffer = mockk<DataEventBuffer>(relaxed = true) {
+            every { iterator() } returns object : MutableIterator<DataEvent> {
+                private val events = listOf(mockDataEvent)
+                private var index = 0
+                
+                override fun hasNext(): Boolean = index < events.size
+                override fun next(): DataEvent = events[index++]
+                override fun remove() {}
+            }
+        }
+        
+        val mockDataMap = mockk<DataMap>(relaxed = true)
+        val mockDataMapItem = mockk<DataMapItem> {
+            every { dataMap } returns mockDataMap
+        }
+        
+        mockkStatic(DataMapItem::class)
+        every { DataMapItem.fromDataItem(mockDataItem) } returns mockDataMapItem
+        
+        // Mock DataSerializer to avoid actual deserialization
+        mockkObject(DataSerializer)
+        every { DataSerializer.deserializeInertialReadingFromDataMap(mockDataMap) } returns createSampleInertialReading()
+        
+        service.onDataChanged(mockDataEventBuffer)
+        
+        assertNotNull("Inertial data should be received from DataMap", receivedInertialData)
     }
 
     @Test
-    fun `checkConnectionStatus should handle gracefully`() = runTest {
-        // When - This will fail in test environment due to missing Google Play Services
-        // but we can test that it doesn't crash
-        val result = try {
-            communicationService.checkConnectionStatus()
-        } catch (e: Exception) {
-            // Expected in test environment
-            false
-        }
+    fun `connection status flow is accessible`() {
+        val status = service.connectionStatus.value
+        
+        assertTrue("Connection status should be a valid enum value", 
+            status in listOf(ConnectionStatus.CONNECTED, ConnectionStatus.CONNECTING, ConnectionStatus.DISCONNECTED, ConnectionStatus.ERROR))
+    }
 
-        // Then - Should not crash and return a boolean
-        assert(result is Boolean)
+    // Note: Testing actual network communication methods (startCollection, stopCollection, checkConnectionStatus)
+    // requires more complex mocking of Google Play Services Tasks and would be better suited for integration tests
+    // with actual devices or emulators. The current tests focus on the core message handling logic.
+
+    @Test
+    fun `service handles multiple message events in sequence`() {
+        val inertialReading = createSampleInertialReading()
+        val biometricReading = createSampleBiometricReading()
+        
+        val inertialEvent = mockk<MessageEvent> {
+            every { path } returns "/inertial_data"
+            every { data } returns DataSerializer.serializeInertialReadingToBytes(inertialReading)
+        }
+        
+        val biometricEvent = mockk<MessageEvent> {
+            every { path } returns "/biometric_data"
+            every { data } returns DataSerializer.serializeBiometricReadingToBytes(biometricReading)
+        }
+        
+        service.onMessageReceived(inertialEvent)
+        service.onMessageReceived(biometricEvent)
+        
+        assertNotNull("Inertial data should be received", receivedInertialData)
+        assertNotNull("Biometric data should be received", receivedBiometricData)
+        assertEquals("Inertial session ID should match", inertialReading.sessionId, receivedInertialData?.sessionId)
+        assertEquals("Biometric session ID should match", biometricReading.sessionId, receivedBiometricData?.sessionId)
     }
 }
